@@ -5,8 +5,8 @@ from PIL import Image, ImageTk
 import threading
 import time
 import psutil
+import pytesseract
 import os
-import torch
 
 # Load pre-trained BLIP model and processor
 print("Loading BLIP model and processor...")
@@ -18,14 +18,8 @@ except Exception as e:
     print(f"Error loading model or processor: {e}")
     exit()
 
-# Store performance metrics globally
-performance_metrics = {
-    'time_taken': 0,
-    'memory_used': 0,
-    'bleu_score': 0,
-    'rouge_score': {'rouge1': 0},
-    'meteor_score': 0
-}
+# Global variable to store image path
+image_path = None
 
 # Function to generate a caption and measure performance
 def generate_caption(image_path):
@@ -54,26 +48,15 @@ def generate_caption(image_path):
         elapsed_time = end_time - start_time
         memory_usage = process.memory_info().rss / (1024 * 1024)  # in MB
         
-        # Simulate BLEU, ROUGE, and METEOR scores (in practice, calculate them)
-        bleu_score = 0.75  # Example value
-        rouge_score = {'rouge1': 0.8}  # Example value
-        meteor_score = 0.7  # Example value
-        
-        # Store the performance metrics in the global dictionary
-        performance_metrics['time_taken'] = elapsed_time
-        performance_metrics['memory_used'] = memory_usage
-        performance_metrics['bleu_score'] = bleu_score
-        performance_metrics['rouge_score'] = rouge_score
-        performance_metrics['meteor_score'] = meteor_score
-        
-        return caption
+        return caption, elapsed_time, memory_usage
 
     except Exception as e:
         print(f"Error during caption generation: {e}")
-        return None
+        return None, 0, 0
 
 # Function to handle image selection
 def select_image(root, caption_label):
+    global image_path  # Declare the global variable here
     print("Opening file dialog...")
     image_path = filedialog.askopenfilename(
         title="Select an Image",
@@ -104,10 +87,10 @@ def update_caption(caption, caption_label):
 def generate_caption_threaded(image_path, caption_label):
     def task():
         if image_path:
-            caption = generate_caption(image_path)
+            caption, time_taken, memory_used = generate_caption(image_path)
             if caption:
-                update_caption_in_gui(caption, caption_label)
-                show_performance_metrics()
+                update_caption(caption, caption_label)
+                show_performance_metrics(time_taken, memory_used)
             else:
                 messagebox.showerror("Error", "Failed to generate caption.")
         else:
@@ -116,21 +99,10 @@ def generate_caption_threaded(image_path, caption_label):
     thread = threading.Thread(target=task)
     thread.start()
 
-# Function to update caption from the worker thread
-def update_caption_in_gui(caption, caption_label):
-    caption_label.after(0, update_caption, caption, caption_label)
-
-# Function to display performance metrics
-def show_performance_metrics():
+# Function to display performance metrics in a new window (general metrics)
+def show_performance_metrics(time_taken, memory_used):
     metrics_window = tk.Toplevel()
     metrics_window.title("Performance Metrics")
-    
-    # Access the stored metrics from the global dictionary
-    time_taken = performance_metrics['time_taken']
-    memory_used = performance_metrics['memory_used']
-    bleu_score = performance_metrics['bleu_score']
-    rouge_score = performance_metrics['rouge_score']
-    meteor_score = performance_metrics['meteor_score']
     
     # Add the metrics to the window
     time_label = ttk.Label(metrics_window, text=f"Time taken: {time_taken:.4f} seconds", font=("Helvetica", 12))
@@ -139,30 +111,33 @@ def show_performance_metrics():
     memory_label = ttk.Label(metrics_window, text=f"Memory used: {memory_used:.2f} MB", font=("Helvetica", 12))
     memory_label.grid(row=1, column=0, padx=10, pady=10)
     
-    # Show BLEU score
-    bleu_label = ttk.Label(metrics_window, text=f"BLEU score: {bleu_score:.4f}", font=("Helvetica", 12))
-    bleu_label.grid(row=2, column=0, padx=10, pady=10)
-
-    # Show ROUGE score
-    rouge_label = ttk.Label(metrics_window, text=f"ROUGE score (ROUGE-1): {rouge_score['rouge1']:.4f}", font=("Helvetica", 12))
-    rouge_label.grid(row=3, column=0, padx=10, pady=10)
-
-    # Show METEOR score
-    meteor_label = ttk.Label(metrics_window, text=f"METEOR score: {meteor_score:.4f}", font=("Helvetica", 12))
-    meteor_label.grid(row=4, column=0, padx=10, pady=10)
-
     # Add a button to close the window
     close_button = ttk.Button(metrics_window, text="Close", command=metrics_window.destroy)
-    close_button.grid(row=5, column=0, pady=10)
+    close_button.grid(row=2, column=0, pady=10)
 
+# Function to perform OCR (Optical Character Recognition) on the selected image
+def perform_ocr(image_path, ocr_label):
+    try:
+        print(f"Performing OCR on image: {image_path}")
+        img = Image.open(image_path)
+        ocr_text = pytesseract.image_to_string(img)  # Extract text from image
+        print("OCR completed.")
+        if ocr_text.strip():  # If OCR text is not empty
+            ocr_label.config(text=ocr_text)
+        else:
+            ocr_label.config(text="No text found in the image.")
+    except Exception as e:
+        print(f"Error during OCR: {e}")
+        messagebox.showerror("OCR Error", "Failed to perform OCR.")
 
 # Function to create the GUI
 def create_gui():
+    global image_path  # Declare the global variable here
     root = tk.Tk()
-    root.title("Image Caption Generator")
+    root.title("Image Caption Generator & OCR Tool")
     
     # Set window size and background color
-    root.geometry("600x700")
+    root.geometry("600x800")
     root.configure(bg="#F4F6F8")
 
     # Create a frame for content
@@ -178,11 +153,12 @@ def create_gui():
     frame.grid_rowconfigure(1, weight=1)  # Image display row (expands when window size changes)
     frame.grid_rowconfigure(2, weight=0)  # Button row
     frame.grid_rowconfigure(3, weight=1)  # Caption row
+    frame.grid_rowconfigure(4, weight=1)  # OCR result row
 
     frame.grid_columnconfigure(0, weight=1)  # All widgets in the frame should expand horizontally
 
     # Label for the title (centered)
-    title_label = ttk.Label(frame, text="Image Caption Generator", font=("Helvetica", 18, "bold"), anchor="center")
+    title_label = ttk.Label(frame, text="Image Caption Generator & OCR Tool", font=("Helvetica", 18, "bold"), anchor="center")
     title_label.grid(row=0, column=0, columnspan=2, pady=10)
 
     # Button to select an image (centered)
@@ -193,11 +169,16 @@ def create_gui():
     caption_label = ttk.Label(frame, text="Caption will appear here", wraplength=500, font=("Helvetica", 12), anchor="center")
     caption_label.grid(row=3, column=0, pady=20, padx=10, sticky="ew")
 
-    # Performance metrics button
-    metrics_button = ttk.Button(frame, text="Model Performance Metrics", command=show_performance_metrics)
-    metrics_button.grid(row=2, column=0, pady=10, padx=10, sticky="ew")
+    # Button to trigger OCR
+    ocr_button = ttk.Button(frame, text="Perform OCR", command=lambda: perform_ocr(image_path, ocr_label))
+    ocr_button.grid(row=2, column=0, pady=10, padx=10, sticky="ew")
 
+    # Label to display the OCR text result
+    ocr_label = ttk.Label(frame, text="OCR result will appear here", wraplength=500, font=("Helvetica", 12), anchor="center")
+    ocr_label.grid(row=4, column=0, pady=20, padx=10, sticky="ew")
+
+    # Start the GUI loop
     root.mainloop()
 
-# Run the application
+# Start the GUI
 create_gui()

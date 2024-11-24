@@ -7,6 +7,8 @@ import time
 import psutil
 import os
 import torch
+import pyttsx3
+
 
 # Load pre-trained BLIP model and processor
 print("Loading BLIP model and processor...")
@@ -71,6 +73,19 @@ def generate_caption(image_path):
     except Exception as e:
         print(f"Error during caption generation: {e}")
         return None
+
+# Function to speak the caption
+def speak_caption(caption):
+    if caption.strip():  # Ensure there's text to speak
+        engine = pyttsx3.init()  # Initialize the TTS engine
+        engine.setProperty('rate', 150)  # Set the speaking speed
+        engine.setProperty('volume', 1.0)  # Set volume to maximum
+
+        # Speak the caption
+        engine.say(caption)
+        engine.runAndWait()
+    else:
+        print("No caption to speak.")
 
 # Function to handle image selection
 def select_image(root, caption_label):
@@ -196,6 +211,10 @@ def create_gui():
     # Performance metrics button
     metrics_button = ttk.Button(frame, text="Model Performance Metrics", command=show_performance_metrics)
     metrics_button.grid(row=2, column=0, pady=10, padx=10, sticky="ew")
+    
+    # Button to speak the caption
+    speak_button = ttk.Button(frame, text="Speak Caption", command=lambda: speak_caption(caption_label.cget("text")))
+    speak_button.grid(row=4, column=0, pady=10, padx=10, sticky="ew")
 
     root.mainloop()
 

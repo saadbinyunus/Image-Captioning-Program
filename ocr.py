@@ -7,6 +7,11 @@ import time
 import psutil
 import pytesseract
 import os
+import pytesseract
+
+# Set the Tesseract executable path
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+
 
 # Load pre-trained BLIP model and processor
 print("Loading BLIP model and processor...")

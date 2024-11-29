@@ -8,7 +8,25 @@ import psutil
 import os
 import torch
 import pyttsx3
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# Preprocess the image
+def preprocess_image(image_path, image_size=384):
+    try:
+        raw_image = Image.open(image_path).convert("RGB")
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        ])
+        image_tensor = transform(raw_image).unsqueeze(0).to(device)
+        return image_tensor
+    except Exception as e:
+        print(f"Error in preprocessing image: {e}")
+        return None
 
 # Load pre-trained BLIP model and processor
 print("Loading BLIP model and processor...")
@@ -36,15 +54,13 @@ def generate_caption(image_path):
         process = psutil.Process()  # Process to measure memory usage
 
         print(f"Opening image: {image_path}")
-        raw_image = Image.open(image_path).convert("RGB")
-        print("Image opened successfully.")
-
-        print("Preprocessing image...")
-        inputs = processor(raw_image, return_tensors="pt")
-        print("Image preprocessed.")
+        # Use custom preprocessing instead of BLIP processor
+        image_tensor = preprocess_image(image_path, image_size=384)
+        if image_tensor is None:
+            raise ValueError("Image preprocessing failed.")
 
         print("Generating caption...")
-        out = model.generate(**inputs)
+        out = model.generate(image_tensor)  # Use BLIP model directly
         print("Caption generated.")
 
         # Decode the output into text
@@ -177,7 +193,7 @@ def create_gui():
     root.title("Image Caption Generator")
     
     # Set window size and background color
-    root.geometry("600x700")
+    root.geometry("600x900")
     root.configure(bg="#F4F6F8")
 
     # Create a frame for content

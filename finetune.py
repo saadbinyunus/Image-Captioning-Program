@@ -11,57 +11,97 @@ from torch.optim import AdamW
 from torch.utils.data import Dataset, DataLoader
 import pyttsx3
 import pandas as pd
+import pytesseract
+
 
 # Disable CUDA (Force CPU usage)
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # This disables TensorFlow and PyTorch from using GPU
 
 class ImageCaptionDataset(Dataset):
-    def __init__(self, csv_file, processor):
-        self.data = pd.read_csv(csv_file)
+    def __init__(self, captions_file, images_folder, processor):
+        """
+        Args:
+            captions_file (str): Path to the captions.txt file.
+            images_folder (str): Path to the folder containing images.
+            processor (BlipProcessor): Processor for tokenizing captions and preprocessing images.
+        """
+        self.images_folder = images_folder
         self.processor = processor
+
+        # Load and parse captions
+        self.data = self._load_captions(captions_file)
+
+    def _load_captions(self, captions_file):
+        """
+        Parses the captions.txt file and returns a DataFrame with image filenames and captions.
+        """
+        data = []
+        with open(captions_file, "r") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) == 2:
+                    image_caption_id, caption = parts
+                    image_filename = image_caption_id.split("#")[0]  # Extract the image filename
+                    data.append({"image": image_filename, "caption": caption})
+        return pd.DataFrame(data)
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        image_path = self.data.iloc[idx, 0]
-        caption = self.data.iloc[idx, 1]
+        """
+        Retrieves an image-caption pair, processes them, and returns as a dictionary.
+        """
+        # Get the image filename and caption
+        image_filename = self.data.iloc[idx]["image"]
+        caption = self.data.iloc[idx]["caption"]
+
+        # Construct the full path to the image
+        image_path = os.path.join(self.images_folder, image_filename)
+
+        # Check if the image exists
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Image not found: {image_path}")
+
+        # Open the image and convert to RGB
         raw_image = Image.open(image_path).convert("RGB")
 
-        # Preprocess image
+        # Preprocess the image
         inputs = self.processor(
             images=raw_image,
             return_tensors="pt"
         )
 
-        # Debug: Check processed image input
-        print(f"[DEBUG] Processed image input: {inputs}")
+        # Tokenize the caption and process labels
+        caption_input = self.processor.tokenizer(
+            caption,
+            return_tensors="pt",
+            padding="max_length",
+            truncation=True,
+            max_length=128
+        )
+        labels = caption_input.input_ids.squeeze(0)
 
-        # Tokenize the caption separately for labels
-        caption_input = self.processor.tokenizer(caption, return_tensors="pt", padding="max_length", truncation=True, max_length=128)
-        labels = caption_input.input_ids.squeeze(0)  # Tokenized caption
-
-        # Debug: Check tokenized caption
-        print(f"[DEBUG] Tokenized caption: {caption_input.input_ids}")
-
-        # Replace padding tokens in labels with -100
+        # Replace padding tokens with -100
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
 
-        # Add labels to inputs
-        inputs['labels'] = labels
+        # Add the labels to the inputs
+        inputs["labels"] = labels
 
-        # Debug: Final dataset output
-        print(f"[DEBUG] Final dataset output: {inputs}")
-
-        return {key: val.squeeze(0) for key, val in inputs.items()}  # Remove the batch dimension
+        # Return the processed data (squeezing batch dimension)
+        return {key: val.squeeze(0) for key, val in inputs.items()}
 
 
 def fine_tune_model(model, processor):
-    csv_file = "C:\\Users\\User\\843\\data\\Sample_Dataset.csv"  # Ensure this file exists with proper image paths and captions
+    captions_file = "data/captions.txt"  # Path to captions.txt
+    images_folder = "data/images"  # Path to images folder
+
     try:
-        dataset = ImageCaptionDataset(csv_file, processor)
+        # Create the dataset and dataloader
+        dataset = ImageCaptionDataset(captions_file, images_folder, processor)
         dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
 
+        # Set up the optimizer
         optimizer = AdamW(model.parameters(), lr=5e-5)
         model.train()
 
@@ -69,13 +109,12 @@ def fine_tune_model(model, processor):
         for epoch in range(3):  # Number of epochs
             total_loss = 0
             for i, batch in enumerate(dataloader):
-                # Extract pixel_values and labels from the batch
                 pixel_values = batch["pixel_values"]
                 labels = batch["labels"]
 
-                # Derive input_ids from labels
+                # Prepare the input_ids and replace ignored tokens (-100) with pad token
                 input_ids = labels.clone()
-                input_ids[input_ids == -100] = processor.tokenizer.pad_token_id  # Replace ignored tokens with pad token
+                input_ids[input_ids == -100] = processor.tokenizer.pad_token_id
 
                 # Debugging: Check the final inputs to the model
                 print(f"[DEBUG] Batch {i + 1}")
@@ -83,13 +122,12 @@ def fine_tune_model(model, processor):
                 print(f"[DEBUG] input_ids shape: {input_ids.shape}")
                 print(f"[DEBUG] labels shape: {labels.shape}")
 
-                # Forward pass: Pass pixel_values, input_ids, and labels
+                # Forward pass: Pass the image pixel values, input_ids, and labels to the model
                 outputs = model(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
 
-                # Compute loss
+                # Compute and accumulate the loss
                 loss = outputs.loss
                 total_loss += loss.item()
-                print(f"[DEBUG] Loss for Batch {i + 1}: {loss.item()}")
 
                 # Backward pass
                 loss.backward()
@@ -98,7 +136,7 @@ def fine_tune_model(model, processor):
 
             print(f"Epoch {epoch + 1} completed. Average Loss: {total_loss / len(dataloader):.4f}")
 
-        # Save the fine-tuned model
+        # Save the fine-tuned model and processor
         model.save_pretrained("fine_tuned_model")
         processor.save_pretrained("fine_tuned_model")
         print("Fine-tuning complete. Model saved as 'fine_tuned_model'.")
@@ -106,16 +144,14 @@ def fine_tune_model(model, processor):
         print(f"Error during fine-tuning: {e}")
 
 
-
-
-
+# Main execution
 print("Loading BLIP model and processor...")
 try:
     train_model = input("Do you want to fine-tune the model? (yes/no): ").strip().lower()
     processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
 
-    # Debug: Confirm processor and model loading
+   # Debug: Confirm processor and model loading
     print(f"[DEBUG] Processor loaded: {processor}")
     print(f"[DEBUG] Model loaded: {model}")
 
@@ -201,8 +237,12 @@ def speak_caption(caption):
     else:
         print("No caption to speak.")
 
+# Global variable to store image path
+image_path = None
+
 # Function to handle image selection
 def select_image(root, caption_label):
+    global image_path  # Declare image_path as global so it can be accessed outside this function
     print("Opening file dialog...")
     image_path = filedialog.askopenfilename(
         title="Select an Image",
@@ -214,7 +254,8 @@ def select_image(root, caption_label):
         generate_button = ttk.Button(root, text="Generate Caption", command=lambda: generate_caption_threaded(image_path, caption_label))
         generate_button.grid(row=2, column=0, pady=20, padx=10, sticky="ew")
     
-    return image_path
+    # No need to return image_path as it is now global
+
 
 # Function to display the selected image
 def show_image(image_path, root):
@@ -285,53 +326,108 @@ def show_performance_metrics():
     close_button.grid(row=5, column=0, pady=10)
 
 
-# Function to create the GUI
+# Function to extract text from an image using OCR
+def extract_text_with_ocr(image_path):
+    try:
+        # Open the image
+        image = Image.open(image_path)
+        
+        # Use pytesseract to extract text from the image
+        extracted_text = pytesseract.image_to_string(image)
+        
+        # Return the extracted text
+        return extracted_text.strip()
+    except Exception as e:
+        print(f"Error during OCR: {e}")
+        return None
+
+# Function to speak the extracted OCR text
+def speak_ocr_text(text):
+    if text.strip():  # Ensure there's text to speak
+        engine = pyttsx3.init()  # Initialize the TTS engine
+        engine.setProperty('rate', 150)  # Set the speaking speed
+        engine.setProperty('volume', 1.0)  # Set volume to maximum
+        
+        # Speak the OCR text
+        engine.say(text)
+        engine.runAndWait()
+    else:
+        print("No text to speak.")
+
+
+# Function to run OCR and display the extracted text
+def extract_text_threaded(image_path, ocr_label):
+    def task():
+        if image_path:
+            text = extract_text_with_ocr(image_path)
+            if text:
+                ocr_label.after(0, ocr_label.config, {"text": text})
+            else:
+                messagebox.showerror("Error", "No text found in the image.")
+        else:
+            messagebox.showerror("Error", "No image selected.")
+    
+    thread = threading.Thread(target=task)
+    thread.start()
+
 def create_gui():
     root = tk.Tk()
-    root.title("Image Caption Generator")
+    root.title("Image Caption and OCR Generator")
     
     # Set window size and background color
-    root.geometry("600x700")
+    root.geometry("600x800")
     root.configure(bg="#F4F6F8")
 
     # Create a frame for content
     frame = ttk.Frame(root, padding="20")
     frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
 
-    # Grid row and column weight configuration for the root window
-    root.grid_rowconfigure(0, weight=1)  # Allow content area to expand vertically
-    root.grid_columnconfigure(0, weight=1)  # Allow content area to expand horizontally
+    # Configure weights for the root window
+    root.grid_rowconfigure(0, weight=1)
+    root.grid_columnconfigure(0, weight=1)
 
-    # Grid row and column weight configuration for the frame
+    # Configure weights for the frame
     frame.grid_rowconfigure(0, weight=0)  # Title row
-    frame.grid_rowconfigure(1, weight=1)  # Image display row (expands when window size changes)
-    frame.grid_rowconfigure(2, weight=0)  # Button row
-    frame.grid_rowconfigure(3, weight=1)  # Caption row
+    frame.grid_rowconfigure(1, weight=1)  # Image and output rows
+    frame.grid_rowconfigure(2, weight=0)  # Buttons row
+    frame.grid_rowconfigure(3, weight=1)  # Output display rows
+    frame.grid_columnconfigure(0, weight=1)  # Content column
 
-    frame.grid_columnconfigure(0, weight=1)  # All widgets in the frame should expand horizontally
+    # Title Label
+    title_label = ttk.Label(frame, text="Image Caption and OCR Generator", font=("Helvetica", 18, "bold"), anchor="center")
+    title_label.grid(row=0, column=0, pady=10)
 
-    # Label for the title (centered)
-    title_label = ttk.Label(frame, text="Image Caption Generator", font=("Helvetica", 18, "bold"), anchor="center")
-    title_label.grid(row=0, column=0, columnspan=2, pady=10)
-
-    # Button to select an image (centered)
+    # Button to Select Image
     select_button = ttk.Button(frame, text="Select Image", command=lambda: select_image(root, caption_label))
-    select_button.grid(row=1, column=0, pady=10, padx=10, sticky="ew")
+    select_button.grid(row=1, column=0, pady=10, sticky="ew")
 
-    # Label to display the caption (centered)
+    # Caption Label
     caption_label = ttk.Label(frame, text="Caption will appear here", wraplength=500, font=("Helvetica", 12), anchor="center")
-    caption_label.grid(row=3, column=0, pady=20, padx=10, sticky="ew")
+    caption_label.grid(row=2, column=0, pady=10, padx=10, sticky="ew")
 
-    # Performance metrics button
-    metrics_button = ttk.Button(frame, text="Model Performance Metrics", command=show_performance_metrics)
-    metrics_button.grid(row=2, column=0, pady=10, padx=10, sticky="ew")
-    
-    # Button to speak the caption
-    speak_button = ttk.Button(frame, text="Speak Caption", command=lambda: speak_caption(caption_label.cget("text")))
-    speak_button.grid(row=4, column=0, pady=10, padx=10, sticky="ew")
+    # OCR Text Label
+    ocr_label = ttk.Label(frame, text="OCR Text will appear here", wraplength=500, font=("Helvetica", 12), anchor="center")
+    ocr_label.grid(row=3, column=0, pady=10, padx=10, sticky="ew")
+
+    # Button to Generate Caption
+    generate_button = ttk.Button(frame, text="Generate Caption", command=lambda: generate_caption_threaded(image_path, caption_label))
+    generate_button.grid(row=4, column=0, pady=10, sticky="ew")
+
+    # Button to Extract Text using OCR
+    ocr_button = ttk.Button(frame, text="Extract Text (OCR)", command=lambda: extract_text_threaded(image_path, ocr_label))
+    ocr_button.grid(row=5, column=0, pady=10, sticky="ew")
+
+    # Button to Speak Caption
+    speak_caption_button = ttk.Button(frame, text="Speak Caption", command=lambda: speak_caption(caption_label.cget("text")))
+    speak_caption_button.grid(row=6, column=0, pady=10, sticky="ew")
+
+    # Button to Speak OCR Text
+    speak_ocr_button = ttk.Button(frame, text="Speak OCR", command=lambda: speak_ocr_text(ocr_label.cget("text")))
+    speak_ocr_button.grid(row=7, column=0, pady=10, sticky="ew")
 
     root.mainloop()
 
 # Run the application
 create_gui()
+
 

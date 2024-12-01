@@ -22,8 +22,7 @@ from rouge_score import rouge_scorer
 from nltk.translate.meteor_score import meteor_score
 import pandas as pd
 import shutil
-
-
+from googletrans import Translator
 
 
 # Disable CUDA (Force CPU usage)
@@ -486,18 +485,6 @@ def show_performance_metrics():
     
     memory_label = ttk.Label(metrics_window, text=f"Memory used: {memory_used:.2f} MB", font=("Helvetica", 12))
     memory_label.grid(row=1, column=0, padx=10, pady=10)
-    
-    # Show BLEU score
-    bleu_label = ttk.Label(metrics_window, text=f"BLEU score: {bleu_score:.4f}", font=("Helvetica", 12))
-    bleu_label.grid(row=2, column=0, padx=10, pady=10)
-
-    # Show ROUGE score
-    rouge_label = ttk.Label(metrics_window, text=f"ROUGE score (ROUGE-1): {rouge_score['rouge1']:.4f}", font=("Helvetica", 12))
-    rouge_label.grid(row=3, column=0, padx=10, pady=10)
-
-    # Show METEOR score
-    meteor_label = ttk.Label(metrics_window, text=f"METEOR score: {meteor_score:.4f}", font=("Helvetica", 12))
-    meteor_label.grid(row=4, column=0, padx=10, pady=10)
 
     # Add a button to close the window
     close_button = ttk.Button(metrics_window, text="Close", command=metrics_window.destroy)
@@ -587,12 +574,21 @@ def create_caption_input_fields(root, frame, image_path):
     frame.grid_columnconfigure(1, weight=0)  # Captions (content area)
     frame.grid_columnconfigure(2, weight=1)  # Right padding
 
+    # Instructional Label
+    instruction_label = ttk.Label(
+        frame, 
+        text="Help us improve our model by inputting 5 appropriate captions for the image selected!", 
+        font=("Helvetica", 10, "italic"), 
+        wraplength=500
+    )
+    instruction_label.grid(row=0, column=0, columnspan=2, pady=10, padx=5, sticky="w")
+
     for i in range(5):
         label = ttk.Label(frame, text=f"Caption {i + 1}:", font=("Helvetica", 10))
-        label.grid(row=i, column=0, pady=5, padx=5, sticky="w")
+        label.grid(row=i + 1, column=0, pady=5, padx=5, sticky="w")
 
-        text_input = tk.Text(frame, height=2, width=50, wrap="word", font=("Helvetica", 10))
-        text_input.grid(row=i, column=1, pady=5, padx=5)
+        text_input = tk.Text(frame, height=1, width=50, wrap="word", font=("Helvetica", 10))
+        text_input.grid(row=i + 1, column=1, pady=5, padx=5)
         captions_inputs.append(text_input)
 
     # Save Button
@@ -601,13 +597,37 @@ def create_caption_input_fields(root, frame, image_path):
         text="Save Captions", 
         command=lambda: save_captions_to_file(image_path, captions_inputs)
     )
-    save_button.grid(row=5, column=0, columnspan=2, pady=10, sticky="ew")
+    save_button.grid(row=6, column=0, columnspan=2, pady=10, sticky="ew")
 
+def translate_caption(caption, target_language):
+    try:
+        translator = Translator()
+        translation = translator.translate(caption, dest=target_language)
+        return translation.text
+    except Exception as e:
+        print(f"Error during translation: {e}")
+        return caption  # Return the original caption if translation fails
+
+# Function to run OCR and display the extracted text
+def extract_text_threaded(image_path, ocr_label):
+    def task():
+        if image_path:
+            text = extract_text_with_ocr(image_path)
+            if text:
+                ocr_label.after(0, ocr_label.config, {"text": text})
+            else:
+                messagebox.showerror("Error", "No text found in the image.")
+        else:
+            messagebox.showerror("Error", "No image selected.")
+    
+    thread = threading.Thread(target=task)
+    thread.start()
 
 def create_gui():
     root = tk.Tk()
     root.title("Image Caption and OCR Generator")
-    
+
+    root.state("zoomed")      
     # Set window size and background color
     root.geometry("600x800")
     root.configure(bg="#F4F6F8")
@@ -647,19 +667,36 @@ def create_gui():
     generate_button = ttk.Button(frame, text="Generate Caption", command=lambda: generate_caption_threaded(image_path, caption_label))
     generate_button.grid(row=4, column=0, pady=10, sticky="ew")
 
+    # Button to Speak Caption
+    speak_caption_button = ttk.Button(frame, text="Speak Caption", command=lambda: speak_caption(caption_label.cget("text")))
+    speak_caption_button.grid(row=4, column=1, pady=10, sticky="ew")
+
     # Button to Extract Text using OCR
     ocr_button = ttk.Button(frame, text="Extract Text (OCR)", command=lambda: extract_text_threaded(image_path, ocr_label))
     ocr_button.grid(row=5, column=0, pady=10, sticky="ew")
 
-    # Button to Speak Caption
-    speak_caption_button = ttk.Button(frame, text="Speak Caption", command=lambda: speak_caption(caption_label.cget("text")))
-    speak_caption_button.grid(row=6, column=0, pady=10, sticky="ew")
-
     # Button to Speak OCR Text
     speak_ocr_button = ttk.Button(frame, text="Speak OCR", command=lambda: speak_ocr_text(ocr_label.cget("text")))
-    speak_ocr_button.grid(row=7, column=0, pady=10, sticky="ew")
+    speak_ocr_button.grid(row=5, column=1, pady=10, sticky="ew")
+ 
+    # Translation Dropdown and Button
+    languages = {'English': 'en', 'Spanish': 'es', 'French': 'fr', 'German': 'de', 'Bengali': 'bn'}
+    selected_language = tk.StringVar(value="en")  # Default to English
+
+    # Dropdown menu for language selection
+    language_menu = ttk.Combobox(frame, values=list(languages.keys()), state="readonly", textvariable=selected_language)
+    language_menu.grid(row=6, column=0, pady=10, sticky="ew")
+    language_menu.current(0)  # Set default to English
+
+    # Translate Button
+    translate_button = ttk.Button(frame, text="Translate Caption", 
+                                   command=lambda: update_caption(
+                                       translate_caption(caption_label.cget("text"), languages[selected_language.get()]), 
+                                       caption_label))
+    translate_button.grid(row=6, column=1, pady=10, sticky="ew")
 
     root.mainloop()
+
 
 # Run the application
 if __name__ == "__main__":

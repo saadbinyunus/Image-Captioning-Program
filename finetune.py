@@ -13,22 +13,13 @@ import pyttsx3
 import pandas as pd
 import pytesseract
 from sklearn.model_selection import train_test_split
-
-
+from transformers import get_scheduler
+from torchvision import transforms
+from torchvision.transforms.functional import InterpolationMode
 
 # Disable CUDA (Force CPU usage)
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # This disables TensorFlow and PyTorch from using GPU
-
-from sklearn.model_selection import train_test_split
-
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-import os
-import pandas as pd
-import torch
-from transformers import BlipProcessor, BlipForConditionalGeneration, AdamW
-from sklearn.model_selection import train_test_split
-from transformers import get_scheduler
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class ImageCaptionDataset(Dataset):
     def __init__(self, captions_file, images_folder, processor, data=None):
@@ -145,30 +136,77 @@ def fine_tune_model(model, processor):
         print(f"Error during fine-tuning: {e}")
 
 
+# Preprocess the image
+def preprocess_image(image_path, image_size=384):
+    try:
+        raw_image = Image.open(image_path).convert("RGB")
+        transform = transforms.Compose([
+            transforms.Resize((image_size, image_size), interpolation=InterpolationMode.BICUBIC),
+            transforms.ToTensor(),
+            transforms.Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711))
+        ])
+        image_tensor = transform(raw_image).unsqueeze(0).to(device)
+        return image_tensor
+    except Exception as e:
+        print(f"Error in preprocessing image: {e}")
+        return None
 
-# Main execution
+# Load pre-trained BLIP model and processor
 print("Loading BLIP model and processor...")
 try:
-    train_model = input("Do you want to fine-tune the model? (yes/no): ").strip().lower()
     processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
     model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-
-   # Debug: Confirm processor and model loading
-    print(f"[DEBUG] Processor loaded: {processor}")
-    print(f"[DEBUG] Model loaded: {model}")
-
-    device = "cpu"  # Explicitly set the device to CPU
-    model.to(device)  # Ensure the model is on the CPU
-
-    if train_model == "yes":
-        fine_tune_model(model, processor)
-    else:
-        print("Using the pre-trained model for inference.")
-
+    print("Model and processor loaded successfully.")
 except Exception as e:
     print(f"Error loading model or processor: {e}")
     exit()
 
+
+def handle_model_choice(choice):
+    global model, processor
+    try:
+        processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+        model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
+        model.to("cpu")  # Ensure model is on CPU
+
+        if choice == 1:
+            print("Fine-tuning the model...")
+            fine_tune_model(model, processor)
+        elif choice == 2:
+            model_path = "fine_tuned_model"
+            if os.path.exists(model_path):
+                print("Loading saved fine-tuned model...")
+                model = BlipForConditionalGeneration.from_pretrained(model_path)
+                processor = BlipProcessor.from_pretrained(model_path)
+                print("Fine-tuned model loaded successfully.")
+            else:
+                messagebox.showerror("Error", "Fine-tuned model not found. Please fine-tune the model first.")
+        elif choice == 3:
+            print("Using the pre-trained model for inference.")
+        else:
+            messagebox.showerror("Error", "Invalid option selected.")
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {e}")
+
+
+def create_model_selection_gui():
+    model_selection_root = tk.Tk()
+    model_selection_root.title("Select Model Option")
+    model_selection_root.geometry("300x200")
+    
+    label = ttk.Label(model_selection_root, text="Choose an option:", font=("Helvetica", 12))
+    label.pack(pady=10)
+
+    fine_tune_button = ttk.Button(model_selection_root, text="Fine-tune Model", command=lambda: [handle_model_choice(1), model_selection_root.destroy()])
+    fine_tune_button.pack(pady=5)
+
+    saved_model_button = ttk.Button(model_selection_root, text="Use Saved Fine-tuned Model", command=lambda: [handle_model_choice(2), model_selection_root.destroy()])
+    saved_model_button.pack(pady=5)
+
+    pretrained_model_button = ttk.Button(model_selection_root, text="Use Pre-trained Model", command=lambda: [handle_model_choice(3), model_selection_root.destroy()])
+    pretrained_model_button.pack(pady=5)
+
+    model_selection_root.mainloop()
 
 
 # Store performance metrics globally
@@ -194,7 +232,6 @@ def generate_caption(image_path):
         print("Preprocessing image...")
         inputs = processor(raw_image, return_tensors="pt").to(device)  # Use CPU
         print("Image preprocessed.")
-
         print("Generating caption...")
         out = model.generate(**inputs)
         print("Caption generated.")
@@ -430,6 +467,8 @@ def create_gui():
     root.mainloop()
 
 # Run the application
-create_gui()
+if __name__ == "__main__":
+    create_model_selection_gui()
+    create_gui()  # Starts the main application GUI
 
 

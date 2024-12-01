@@ -21,35 +21,34 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '-1'  # This disables TensorFlow and PyTorc
 
 from sklearn.model_selection import train_test_split
 
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+import os
+import pandas as pd
+import torch
+from transformers import BlipProcessor, BlipForConditionalGeneration, AdamW
+from sklearn.model_selection import train_test_split
+from transformers import get_scheduler
+
 class ImageCaptionDataset(Dataset):
     def __init__(self, captions_file, images_folder, processor, data=None):
-        """
-        Args:
-            captions_file (str): Path to the captions.txt file.
-            images_folder (str): Path to the folder containing images.
-            processor (BlipProcessor): Processor for tokenizing captions and preprocessing images.
-            data (pd.DataFrame): Optionally, the data (image, caption pairs) passed as a DataFrame.
-        """
         self.images_folder = images_folder
         self.processor = processor
 
-        # Use the provided data if passed, otherwise load from captions file
+        # Load data
         if data is None:
             self.data = self._load_captions(captions_file)
         else:
             self.data = data
 
     def _load_captions(self, captions_file):
-        """
-        Parses the captions.txt file and returns a DataFrame with image filenames and captions.
-        """
         data = []
         with open(captions_file, "r") as f:
             for line in f:
                 parts = line.strip().split("\t")
                 if len(parts) == 2:
                     image_caption_id, caption = parts
-                    image_filename = image_caption_id.split("#")[0]  # Extract the image filename
+                    image_filename = image_caption_id.split("#")[0]
                     data.append({"image": image_filename, "caption": caption})
         return pd.DataFrame(data)
 
@@ -57,71 +56,52 @@ class ImageCaptionDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        """
-        Retrieves an image-caption pair, processes them, and returns as a dictionary.
-        """
         image_filename = self.data.iloc[idx]["image"]
         caption = self.data.iloc[idx]["caption"]
-
-        # Construct the full path to the image
         image_path = os.path.join(self.images_folder, image_filename)
 
-        # Check if the image exists
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image not found: {image_path}")
 
-        # Open the image and convert to RGB
         raw_image = Image.open(image_path).convert("RGB")
-
-        # Preprocess the image
         inputs = self.processor(images=raw_image, return_tensors="pt")
-
-        # Tokenize the caption and process labels
-        caption_input = self.processor.tokenizer(
-            caption,
-            return_tensors="pt",
-            padding="max_length",
-            truncation=True,
-            max_length=128
-        )
+        
+        caption_input = self.processor.tokenizer(caption, return_tensors="pt", padding="max_length", truncation=True, max_length=128)
         labels = caption_input.input_ids.squeeze(0)
-
-        # Replace padding tokens with -100
         labels[labels == self.processor.tokenizer.pad_token_id] = -100
-
-        # Add the labels to the inputs
         inputs["labels"] = labels
 
         return {key: val.squeeze(0) for key, val in inputs.items()}
 
 
 def fine_tune_model(model, processor):
-    captions_file = "data/captions.txt"  # Path to captions.txt
-    images_folder = "data/images"  # Path to images folder
+    captions_file = "data/captions.txt"
+    images_folder = "data/images"
 
     try:
-        # Load and split the dataset into training and testing sets
         dataset = ImageCaptionDataset(captions_file, images_folder, processor)
-        train_data, test_data = train_test_split(dataset.data, test_size=0.2, random_state=42)  # 20% for test
+        train_data, test_data = train_test_split(dataset.data, test_size=0.2, random_state=42)
 
-        # Create DataLoader for training and testing datasets
         train_dataset = ImageCaptionDataset(captions_file, images_folder, processor, data=train_data)
         test_dataset = ImageCaptionDataset(captions_file, images_folder, processor, data=test_data)
 
         train_dataloader = DataLoader(train_dataset, batch_size=2, shuffle=True)
         test_dataloader = DataLoader(test_dataset, batch_size=2, shuffle=False)
 
-        # Set up the optimizer
         optimizer = AdamW(model.parameters(), lr=3e-5)
         model.train()
 
+        num_training_steps = len(train_dataloader) * 3
+        lr_scheduler = get_scheduler(
+            "linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
+        )
+
         print("Fine-tuning the model...")
-        for epoch in range(5):  # Number of epochs
+        for epoch in range(3):
             total_loss = 0
             for i, batch in enumerate(train_dataloader):
                 pixel_values = batch["pixel_values"]
                 labels = batch["labels"]
-
                 input_ids = labels.clone()
                 input_ids[input_ids == -100] = processor.tokenizer.pad_token_id
 
@@ -131,28 +111,24 @@ def fine_tune_model(model, processor):
                 print(f"[DEBUG] input_ids shape: {input_ids.shape}")
                 print(f"[DEBUG] labels shape: {labels.shape}")
 
-                # Forward pass: Pass the image pixel values, input_ids, and labels to the model
-                outputs = model(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
 
-                # Compute and accumulate the loss
+                outputs = model(pixel_values=pixel_values, input_ids=input_ids, labels=labels)
                 loss = outputs.loss
                 total_loss += loss.item()
 
-                # Backward pass
                 loss.backward()
                 optimizer.step()
+                lr_scheduler.step()  # Update the learning rate after every step
                 optimizer.zero_grad()
 
             print(f"Epoch {epoch + 1} completed. Average Loss: {total_loss / len(train_dataloader):.4f}")
 
-            # Evaluation on test set
             model.eval()
             test_loss = 0
             with torch.no_grad():
                 for batch in test_dataloader:
                     pixel_values = batch["pixel_values"]
                     labels = batch["labels"]
-
                     input_ids = labels.clone()
                     input_ids[input_ids == -100] = processor.tokenizer.pad_token_id
 
@@ -161,12 +137,13 @@ def fine_tune_model(model, processor):
 
             print(f"Test Loss after Epoch {epoch + 1}: {test_loss / len(test_dataloader):.4f}")
 
-        # Save the fine-tuned model and processor
         model.save_pretrained("fine_tuned_model")
         processor.save_pretrained("fine_tuned_model")
         print("Fine-tuning complete. Model saved as 'fine_tuned_model'.")
+
     except Exception as e:
         print(f"Error during fine-tuning: {e}")
+
 
 
 # Main execution

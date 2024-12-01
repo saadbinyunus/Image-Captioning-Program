@@ -339,6 +339,7 @@ class _HomePageState extends State<HomePage> {
                 child: Text('Pick Image'),
               ),
               SizedBox(height: 20),
+
               // Text Field for user input
               TextField(
                 controller: _textController,
